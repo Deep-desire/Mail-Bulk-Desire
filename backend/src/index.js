@@ -723,33 +723,79 @@ apiRouter.get('/contacts/logs', catchAsync(async (req, res) => {
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '10', 10)));
   const skip = (page - 1) * limit;
 
-  const { status, search, startDate, endDate } = req.query;
+  const { status, search, startDate, endDate, dates } = req.query;
   const where = {};
 
   if (status && status !== 'all') {
     where.deliveryStatus = String(status);
   }
 
+  const searchConditions = [];
   if (search && String(search).trim() !== '') {
     const searchStr = String(search).trim();
-    where.OR = [
+    searchConditions.push(
       { email: { contains: searchStr, mode: 'insensitive' } },
       { name: { contains: searchStr, mode: 'insensitive' } },
       { upload: { originalName: { contains: searchStr, mode: 'insensitive' } } },
-      { upload: { fileName: { contains: searchStr, mode: 'insensitive' } } },
-    ];
+      { upload: { fileName: { contains: searchStr, mode: 'insensitive' } } }
+    );
   }
 
-  if (startDate || endDate) {
-    where.createdAt = {};
-    if (startDate) {
-      where.createdAt.gte = new Date(String(startDate));
+  const dateConditions = [];
+
+  if (dates && String(dates).trim() !== '') {
+    const datesArray = String(dates)
+      .split(',')
+      .map((d) => d.trim())
+      .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
+
+    if (datesArray.length > 0) {
+      datesArray.forEach((d) => {
+        const startLocal = new Date(`${d}T00:00:00`);
+        const endLocal = new Date(`${d}T23:59:59.999`);
+        const startUtc = new Date(`${d}T00:00:00.000Z`);
+        const endUtc = new Date(`${d}T23:59:59.999Z`);
+
+        dateConditions.push(
+          { sentAt: { gte: startLocal, lte: endLocal } },
+          { sentAt: { gte: startUtc, lte: endUtc } },
+          { sentAt: null, createdAt: { gte: startLocal, lte: endLocal } },
+          { sentAt: null, createdAt: { gte: startUtc, lte: endUtc } }
+        );
+      });
     }
-    if (endDate) {
-      const end = new Date(String(endDate));
-      end.setHours(23, 59, 59, 999);
-      where.createdAt.lte = end;
+  } else if (startDate || endDate) {
+    const startStr = startDate ? String(startDate).split('T')[0] : null;
+    const endStr = endDate ? String(endDate).split('T')[0] : startStr;
+
+    if (startStr || endStr) {
+      const s = startStr || endStr;
+      const e = endStr || startStr;
+
+      const startLocal = new Date(`${s}T00:00:00`);
+      const endLocal = new Date(`${e}T23:59:59.999`);
+      const startUtc = new Date(`${s}T00:00:00.000Z`);
+      const endUtc = new Date(`${e}T23:59:59.999Z`);
+
+      dateConditions.push(
+        { sentAt: { gte: startLocal, lte: endLocal } },
+        { sentAt: { gte: startUtc, lte: endUtc } },
+        { sentAt: null, createdAt: { gte: startLocal, lte: endLocal } },
+        { sentAt: null, createdAt: { gte: startUtc, lte: endUtc } }
+      );
     }
+  }
+
+  const andClauses = [];
+  if (searchConditions.length > 0) {
+    andClauses.push({ OR: searchConditions });
+  }
+  if (dateConditions.length > 0) {
+    andClauses.push({ OR: dateConditions });
+  }
+
+  if (andClauses.length > 0) {
+    where.AND = andClauses;
   }
 
   const [logs, total] = await Promise.all([

@@ -19,6 +19,7 @@ import toast from 'react-hot-toast';
 import { uploadApi } from '../api/upload.api';
 import { Contact } from '../types';
 import StatusBadge from '../components/StatusBadge';
+import MultiDatePicker, { formatHumanDate } from '../components/MultiDatePicker';
 
 type LogItem = Contact & {
   upload: {
@@ -52,8 +53,10 @@ export default function DeliveryLogs() {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [status, setStatus] = useState<'all' | 'sent' | 'failed' | 'pending' | 'skipped'>(initialStatus);
   const [loading, setLoading] = useState(true);
-  const [selectedDate, setSelectedDate] = useState('');
-  const dateInputRef = useRef<HTMLInputElement>(null);
+
+  // Multi-Discrete Date Picker State
+  const [selectedDates, setSelectedDates] = useState<string[]>([]);
+  const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
 
   // Debounce search input
   useEffect(() => {
@@ -82,18 +85,25 @@ export default function DeliveryLogs() {
     targetPage: number,
     currentStatus: typeof status,
     currentSearch: string,
-    date?: string
+    datesList: string[] = []
   ) => {
     setLoading(true);
     try {
-      const res = await uploadApi.getDeliveryLogs({
+      const params: any = {
         page: targetPage,
         limit,
         status: currentStatus,
         search: currentSearch || undefined,
-        startDate: date || undefined,
-        endDate: date || undefined,
-      });
+      };
+
+      if (Array.isArray(datesList) && datesList.length > 0) {
+        params.dates = datesList.join(',');
+        const sorted = [...datesList].sort();
+        params.startDate = sorted[0];
+        params.endDate = sorted[sorted.length - 1];
+      }
+
+      const res = await uploadApi.getDeliveryLogs(params);
       setLogs(res.data.logs as LogItem[]);
       setTotal(res.data.total);
       setTotalPages(res.data.totalPages);
@@ -106,8 +116,8 @@ export default function DeliveryLogs() {
   }, [limit]);
 
   useEffect(() => {
-    fetchLogs(1, status, debouncedSearch, selectedDate);
-  }, [status, debouncedSearch, selectedDate, fetchLogs]);
+    fetchLogs(1, status, debouncedSearch, selectedDates);
+  }, [status, debouncedSearch, selectedDates, fetchLogs]);
 
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
@@ -116,20 +126,12 @@ export default function DeliveryLogs() {
   };
 
   const handleRefresh = () => {
-    fetchLogs(page, status, debouncedSearch, selectedDate);
+    fetchLogs(page, status, debouncedSearch, selectedDates);
     toast.success('Logs refreshed');
   };
 
   const handleClearDateFilter = () => {
-    setSelectedDate('');
-  };
-
-  const getTodayDateString = () => {
-    const today = new Date();
-    const yyyy = today.getFullYear();
-    const mm = String(today.getMonth() + 1).padStart(2, '0');
-    const dd = String(today.getDate()).padStart(2, '0');
-    return `${yyyy}-${mm}-${dd}`;
+    setSelectedDates([]);
   };
 
   const handleViewClick = (log: LogItem) => {
@@ -216,8 +218,8 @@ export default function DeliveryLogs() {
                 key={tab.id}
                 onClick={() => handleStatusChange(tab.id as any)}
                 className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold uppercase tracking-wider transition-all duration-200 border ${isActive
-                    ? 'bg-brand-600/20 text-brand-400 border-brand-500/20 shadow-md shadow-brand-500/5'
-                    : 'text-gray-400 border-transparent hover:text-white hover:bg-white/5'
+                  ? 'bg-brand-600/20 text-brand-400 border-brand-500/20 shadow-md shadow-brand-500/5'
+                  : 'text-gray-400 border-transparent hover:text-white hover:bg-white/5'
                   }`}
               >
                 <Icon className="w-4 h-4" />
@@ -257,37 +259,31 @@ export default function DeliveryLogs() {
                 <th className="px-6 py-4">Status</th>
                 <th className="px-6 py-4 relative">
                   <div className="flex items-center gap-1.5">
-                    {/* Hidden native input to show calendar picker directly */}
-                    <input
-                      type="date"
-                      ref={dateInputRef}
-                      value={selectedDate}
-                      max={getTodayDateString()}
-                      onChange={(e) => setSelectedDate(e.target.value)}
-                      className="absolute opacity-0 pointer-events-none w-0 h-0 [color-scheme:dark]"
-                      style={{ colorScheme: 'dark' }}
-                    />
-
                     <button
                       type="button"
-                      onClick={() => dateInputRef.current?.showPicker()}
+                      onClick={() => setIsDatePickerOpen(!isDatePickerOpen)}
                       className={`flex items-center gap-1.5 uppercase font-semibold text-xs text-left transition-colors ${
-                        selectedDate
+                        selectedDates.length > 0
                           ? 'text-brand-400 hover:text-brand-300'
                           : 'text-gray-400 hover:text-white'
                       }`}
                     >
                       <span>Sent / Attempted At</span>
                       <Calendar className={`w-3.5 h-3.5 ${
-                        selectedDate
+                        selectedDates.length > 0
                           ? 'text-brand-400 fill-brand-400/10'
                           : 'text-gray-500'
                       }`} />
                     </button>
 
-                    {selectedDate && (
+                    {/* Active Selected Dates Badges */}
+                    {selectedDates.length > 0 && (
                       <div className="flex items-center gap-1 text-[10px] bg-brand-500/10 border border-brand-500/20 text-brand-400 px-2 py-0.5 rounded-lg">
-                        <span>{new Date(selectedDate).toLocaleDateString()}</span>
+                        <span>
+                          {selectedDates.length === 1
+                            ? formatHumanDate(selectedDates[0])
+                            : `${formatHumanDate(selectedDates[0])} (+${selectedDates.length - 1})`}
+                        </span>
                         <button
                           type="button"
                           onClick={handleClearDateFilter}
@@ -297,6 +293,18 @@ export default function DeliveryLogs() {
                           <X className="w-3 h-3" />
                         </button>
                       </div>
+                    )}
+
+                    {/* Multi-Discrete Date Picker Popover */}
+                    {isDatePickerOpen && (
+                      <MultiDatePicker
+                        selectedDates={selectedDates}
+                        onApply={(dates) => {
+                          setSelectedDates(dates);
+                        }}
+                        onClear={handleClearDateFilter}
+                        onClose={() => setIsDatePickerOpen(false)}
+                      />
                     )}
                   </div>
                 </th>
@@ -405,7 +413,7 @@ export default function DeliveryLogs() {
           {totalPages > 1 && (
             <div className="flex items-center gap-2">
               <button
-                onClick={() => fetchLogs(page - 1, status, debouncedSearch, selectedDate)}
+                onClick={() => fetchLogs(page - 1, status, debouncedSearch, selectedDates)}
                 disabled={page === 1}
                 className="p-2 rounded-lg bg-white/5 border border-white/10 text-gray-400 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
               >
@@ -415,7 +423,7 @@ export default function DeliveryLogs() {
                 Page {page} of {totalPages}
               </span>
               <button
-                onClick={() => fetchLogs(page + 1, status, debouncedSearch, selectedDate)}
+                onClick={() => fetchLogs(page + 1, status, debouncedSearch, selectedDates)}
                 disabled={page === totalPages}
                 className="p-2 rounded-lg bg-white/5 border border-white/10 text-gray-400 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
               >
