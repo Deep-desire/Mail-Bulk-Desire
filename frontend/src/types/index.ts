@@ -19,7 +19,7 @@ export interface Upload {
   invalidEmails: number;
   duplicateEmails: number;
   unsubscribedEmails: number;
-  status: 'idle' | 'scheduled' | 'processing' | 'completed' | 'completed_with_errors' | 'failed';
+  status: 'idle' | 'scheduled' | 'processing' | 'paused' | 'completed' | 'completed_with_errors' | 'failed';
   totalCount: number;
   sentCount: number;
   failedCount: number;
@@ -150,4 +150,6 @@ export interface CampaignHealth {
   mode: 'azure-durable' | 'in-process';
   stalled: boolean;
   reasons: string[];
+  canPause: boolean;
+  canResume: boolean;
 }

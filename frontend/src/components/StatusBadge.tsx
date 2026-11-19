@@ -15,6 +15,7 @@ const statusColors: Record<string, string> = {
   draft: 'bg-slate-500/15 text-slate-400 border-slate-500/20',
   scheduled: 'bg-purple-500/15 text-purple-400 border-purple-500/20',
   processing: 'bg-blue-500/15 text-blue-400 border-blue-500/20',
+  paused: 'bg-amber-500/15 text-amber-400 border-amber-500/20',
   completed: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20',
   completed_with_errors: 'bg-orange-500/15 text-orange-400 border-orange-500/20',
   failed: 'bg-red-500/15 text-red-400 border-red-500/20',

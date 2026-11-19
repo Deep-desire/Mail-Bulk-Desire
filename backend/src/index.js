@@ -121,7 +121,8 @@ function invalidateUnsubscribedCache() {
 const VALID_TRANSITIONS = {
   idle: ['processing', 'scheduled'],
   scheduled: ['idle', 'processing', 'scheduled'],
-  processing: ['completed', 'completed_with_errors', 'failed'],
+  processing: ['completed', 'completed_with_errors', 'failed', 'paused'],
+  paused: ['processing', 'idle'],
   completed: ['idle', 'processing', 'scheduled'],
   completed_with_errors: ['idle', 'processing', 'scheduled'],
   failed: ['idle', 'processing', 'scheduled'],
@@ -236,6 +237,12 @@ async function processCampaignInBackground(uploadId, templateId) {
 
     for (let i = 0; i < pendingContacts.length; i++) {
       const contact = pendingContacts[i];
+
+      const live = await prisma.upload.findUnique({ where: { id: uploadId }, select: { status: true } });
+      if (!live || live.status !== 'processing') {
+        await logCampaign(uploadId, 'info', 'worker_stop', `In-process worker stopped: campaign is '${live?.status}'`);
+        return;
+      }
 
       const claim = await prisma.contact.updateMany({
         where: { id: contact.id, deliveryStatus: 'pending' },
@@ -1251,7 +1258,44 @@ apiRouter.get('/uploads/:id/health', catchAsync(async (req, res) => {
     mode: process.env.DURABLE_STARTER_URL ? 'azure-durable' : 'in-process',
     stalled: reasons.length > 0,
     reasons,
+    canPause: upload.status === 'processing' && pending > 0,
+    canResume: pending > 0 && (upload.status === 'paused' || reasons.length > 0),
   });
+}));
+
+
+// POST /uploads/:id/pause — stop sending; pending contacts stay pending
+apiRouter.post('/uploads/:id/pause', catchAsync(async (req, res) => {
+  await authenticate(req);
+  const { id } = req.params;
+  const upload = await prisma.upload.findUnique({ where: { id } });
+  if (!upload) return res.status(404).json({ message: 'Upload not found' });
+  if (upload.status !== 'processing') {
+    return res.status(400).json({ message: `Only a sending campaign can be paused (current: '${upload.status}')` });
+  }
+
+  // 1. Flip status first: every sender checks it before each email, so even
+  //    if terminating the orchestration fails, sending stops at the next step.
+  await prisma.upload.update({ where: { id }, data: { status: 'paused' } });
+
+  // 2. Best-effort terminate the Azure orchestration.
+  if (upload.durableTerminateUrl) {
+    const url = upload.durableTerminateUrl.replace('{text}', encodeURIComponent('Paused from UI'));
+    await fetch(url, { method: 'POST', signal: AbortSignal.timeout(8000) }).catch(() => {});
+  }
+
+  // 3. Contacts that were mid-send stay 'sending' briefly; put any that never
+  //    completed back to pending so Resume picks them up.
+  setTimeout(() => {
+    prisma.contact.updateMany({
+      where: { uploadId: id, deliveryStatus: 'sending', sentAt: { lt: new Date(Date.now() - 60000) } },
+      data: { deliveryStatus: 'pending' },
+    }).catch(() => {});
+  }, 0);
+
+  const pending = await prisma.contact.count({ where: { uploadId: id, deliveryStatus: 'pending' } });
+  await logCampaign(id, 'info', 'pause', `Paused from UI with ${pending} contacts still pending`);
+  return res.status(200).json({ message: `Campaign paused. ${pending} emails left to send.` });
 }));
 
 // POST /uploads/:id/resume — restart sending for the remaining pending contacts
@@ -1261,6 +1305,21 @@ apiRouter.post('/uploads/:id/resume', catchAsync(async (req, res) => {
   const upload = await prisma.upload.findUnique({ where: { id } });
   if (!upload) return res.status(404).json({ message: 'Upload not found' });
   if (!upload.templateId) return res.status(400).json({ message: 'Campaign has no template' });
+
+  if (upload.status === 'processing') {
+    // Only allow resuming a "processing" campaign when it is genuinely stuck.
+    const lastSend = await prisma.contact.findFirst({
+      where: { uploadId: id, sentAt: { not: null } }, orderBy: { sentAt: 'desc' }, select: { sentAt: true },
+    });
+    const idle = lastSend?.sentAt ? Date.now() - new Date(lastSend.sentAt).getTime() : Infinity;
+    const durable = await fetchDurableStatus(upload);
+    const senderAlive = durable?.runtimeStatus && ['Running', 'Pending', 'ContinuedAsNew'].includes(durable.runtimeStatus);
+    if (idle < STALL_THRESHOLD_MS || (senderAlive && idle < STALL_THRESHOLD_MS * 2)) {
+      return res.status(409).json({ message: 'Campaign is already sending. Use Pause if you want to stop it.' });
+    }
+  } else if (upload.status !== 'paused') {
+    return res.status(400).json({ message: `Cannot resume a campaign that is '${upload.status}'` });
+  }
 
   // Cooldown: refuse a second resume within 2 minutes (double-clicks used to
   // start several parallel senders and email people multiple times).

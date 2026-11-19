@@ -15,6 +15,7 @@ import {
   Pencil,
   Trash2,
   AlertTriangle,
+  Pause,
 } from 'lucide-react';
 import { createColumnHelper } from '@tanstack/react-table';
 import toast from 'react-hot-toast';
@@ -251,28 +252,34 @@ export default function UploadDetails() {
   // Stall detection: poll health while the campaign is processing
   const [health, setHealth] = useState<CampaignHealth | null>(null);
   useEffect(() => {
-    if (!id || upload?.status !== 'processing') { setHealth(null); return; }
+    if (!id || (upload?.status !== 'processing' && upload?.status !== 'paused')) { setHealth(null); return; }
     const check = () => uploadApi.getHealth(id).then((r) => setHealth(r.data)).catch(() => {});
     check();
     const t = setInterval(check, 30000);
     return () => clearInterval(t);
   }, [id, upload?.status]);
 
-  const [resuming, setResuming] = useState(false);
-  const handleResume = async () => {
-    if (!id || resuming) return;
-    if (!window.confirm('Resume sending the remaining pending emails?')) return;
-    setResuming(true);
+  const [busy, setBusy] = useState(false);
+  const runAction = async (kind: 'pause' | 'resume') => {
+    if (!id || busy) return;
+    const question = kind === 'pause'
+      ? 'Pause this campaign? Emails already sent stay sent; the rest wait until you resume.'
+      : 'Resume sending the remaining pending emails?';
+    if (!window.confirm(question)) return;
+    setBusy(true);
     try {
-      const r = await uploadApi.resumeSend(id);
+      const r = kind === 'pause' ? await uploadApi.pauseSend(id) : await uploadApi.resumeSend(id);
       toast.success(r.data.message);
+      fetchDetails();
       uploadApi.getHealth(id).then((h) => setHealth(h.data)).catch(() => {});
     } catch (e: any) {
-      toast.error(e?.response?.data?.message || 'Resume failed');
+      toast.error(e?.response?.data?.message || `${kind} failed`);
     } finally {
-      setTimeout(() => setResuming(false), 120000);
+      setTimeout(() => setBusy(false), kind === 'resume' ? 60000 : 3000);
     }
   };
+  const handleResume = () => runAction('resume');
+  const handlePause = () => runAction('pause');
 
   const fetchDetails = () => {
     if (!id) return;
@@ -537,8 +544,8 @@ export default function UploadDetails() {
           </div>
           <div className="flex items-center gap-3">
             <Link to={`/logs?uploadId=${id}`} className="text-xs text-blue-300 underline whitespace-nowrap">View activity log</Link>
-            <button onClick={handleResume} disabled={resuming} className="btn-secondary text-xs py-1.5 px-3 flex items-center gap-1 whitespace-nowrap">
-              <Play className="w-3.5 h-3.5" /> Resume sending
+            <button onClick={handlePause} disabled={busy} className="btn-secondary text-xs py-1.5 px-3 flex items-center gap-1 whitespace-nowrap disabled:opacity-50">
+              <Pause className="w-3.5 h-3.5" /> Pause sending
             </button>
           </div>
         </div>
@@ -555,7 +562,23 @@ export default function UploadDetails() {
           </div>
           <div className="flex gap-2">
             <Link to={`/logs?uploadId=${id}`} className="btn-secondary text-sm py-2 px-4 whitespace-nowrap">View log</Link>
-            <button onClick={handleResume} disabled={resuming} className="btn-primary text-sm py-2 px-4 flex items-center gap-2 whitespace-nowrap">
+            <button onClick={handleResume} disabled={busy} className="btn-primary text-sm py-2 px-4 flex items-center gap-2 whitespace-nowrap disabled:opacity-50">
+              <Play className="w-4 h-4" /> Resume sending
+            </button>
+          </div>
+        </div>
+      )}
+      {upload.status === 'paused' && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Pause className="w-5 h-5 text-amber-400" />
+            <p className="text-sm text-amber-300 font-medium">
+              Campaign paused. {upload.pendingCount} emails waiting to be sent.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <Link to={`/logs?uploadId=${id}`} className="text-xs text-amber-300 underline whitespace-nowrap">View activity log</Link>
+            <button onClick={handleResume} disabled={busy} className="btn-primary text-sm py-2 px-4 flex items-center gap-2 whitespace-nowrap disabled:opacity-50">
               <Play className="w-4 h-4" /> Resume sending
             </button>
           </div>

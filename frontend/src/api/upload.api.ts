@@ -78,6 +78,8 @@ export const uploadApi = {
 
   getHealth: (id: string) => api.get<CampaignHealth>(`/uploads/${id}/health`),
 
+  pauseSend: (id: string) => api.post<{ message: string }>(`/uploads/${id}/pause`),
+
   resumeSend: (id: string) => api.post<{ message: string }>(`/uploads/${id}/resume`),
 
   getDeliveryLogs: (params: { page?: number; limit?: number; search?: string; status?: string; startDate?: string; endDate?: string }) =>

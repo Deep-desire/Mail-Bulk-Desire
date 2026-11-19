@@ -67,6 +67,20 @@ export default function SystemLogs() {
   }, [load, live]);
 
   const [resuming, setResuming] = useState(false);
+  const pause = async () => {
+    if (!uploadId || resuming) return;
+    if (!window.confirm('Pause this campaign? Emails already sent stay sent; the rest wait until you resume.')) return;
+    setResuming(true);
+    try {
+      const r = await uploadApi.pauseSend(uploadId);
+      toast.success(r.data.message);
+      load();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.message || 'Pause failed');
+    } finally {
+      setTimeout(() => setResuming(false), 3000);
+    }
+  };
   const resume = async () => {
     if (!uploadId || resuming) return;
     if (!window.confirm('Resume sending the remaining pending emails?')) return;
@@ -137,11 +151,16 @@ export default function SystemLogs() {
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
             <div className="flex items-center gap-2 font-semibold text-white">
               {health.stalled ? <AlertTriangle className="w-5 h-5 text-red-400" /> : <CheckCircle2 className="w-5 h-5 text-emerald-400" />}
-              {health.stalled ? 'Campaign looks stuck' : health.status === 'processing' ? 'Campaign is moving' : `Campaign ${health.status}`}
+              {health.stalled ? 'Campaign looks stuck' : health.status === 'paused' ? `Campaign paused (${health.pending} waiting)` : health.status === 'processing' ? 'Campaign is moving' : `Campaign ${health.status}`}
             </div>
             <div className="flex gap-2">
               <Link to={`/uploads/${uploadId}`} className="btn-secondary text-sm py-2 px-4">Open campaign</Link>
-              {health.pending > 0 && (
+              {health.canPause && !health.stalled && (
+                <button onClick={pause} disabled={resuming} className="btn-secondary text-sm py-2 px-4 flex items-center gap-2">
+                  <Pause className="w-4 h-4" /> Pause sending
+                </button>
+              )}
+              {health.canResume && (
                 <button onClick={resume} disabled={resuming} className="btn-primary text-sm py-2 px-4 flex items-center gap-2">
                   <Play className="w-4 h-4" /> Resume sending ({health.pending})
                 </button>
