@@ -127,3 +127,27 @@ export interface ProviderSettingsResponse {
   settings: ProviderSetting[];
 }
 
+
+export interface CampaignLog {
+  id: string;
+  uploadId: string | null;
+  level: 'info' | 'warn' | 'error';
+  event: string;
+  message: string;
+  meta: Record<string, unknown> | null;
+  source: string | null;
+  createdAt: string;
+}
+
+export interface CampaignHealth {
+  status: string;
+  pending: number;
+  lastActivityAt: string | null;
+  idleMs: number | null;
+  lastSent: { sentAt: string; email: string; deliveryStatus: string; deliveryError: string | null } | null;
+  lastError: CampaignLog | null;
+  durable: { instanceId?: string; runtimeStatus?: string; lastUpdatedTime?: string; output?: unknown; error?: string } | null;
+  mode: 'azure-durable' | 'in-process';
+  stalled: boolean;
+  reasons: string[];
+}

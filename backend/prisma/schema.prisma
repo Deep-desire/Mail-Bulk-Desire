@@ -115,3 +115,21 @@ model ProviderSetting {
   @@map("provider_settings")
 }
 
+
+// Persistent, per-campaign activity log so the UI can show exactly what the
+// sender is doing (and where it stopped) without needing Vercel/Azure logs.
+model CampaignLog {
+  id        String   @id @default(uuid())
+  uploadId  String?  @map("upload_id")
+  level     String   @default("info") // info, warn, error
+  event     String   // e.g. dispatch, send_ok, provider_error, delay, stalled
+  message   String
+  meta      Json?
+  source    String?  // vercel, azure-orchestrator, azure-activity
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([uploadId, createdAt])
+  @@index([createdAt])
+  @@index([level])
+  @@map("campaign_logs")
+}

@@ -15,6 +15,7 @@ const UploadDetails = lazy(() => import('./pages/UploadDetails'));
 const Templates     = lazy(() => import('./pages/Templates'));
 const CreateTemplate = lazy(() => import('./pages/CreateTemplate'));
 const DeliveryLogs  = lazy(() => import('./pages/DeliveryLogs'));
+const SystemLogs    = lazy(() => import('./pages/SystemLogs'));
 
 function PageLoader() {
   return (
@@ -52,6 +53,10 @@ function App() {
         <Route
           path="/delivery-logs"
           element={<Suspense fallback={<PageLoader />}><DeliveryLogs /></Suspense>}
+        />
+        <Route
+          path="/logs"
+          element={<Suspense fallback={<PageLoader />}><SystemLogs /></Suspense>}
         />
         <Route
           path="/templates"

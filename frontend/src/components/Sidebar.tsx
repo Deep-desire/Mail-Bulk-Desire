@@ -6,6 +6,7 @@ import {
   LogOut,
   Mail,
   ClipboardList,
+  Activity,
 } from 'lucide-react';
 
 const navItems = [
@@ -13,6 +14,7 @@ const navItems = [
   { to: '/uploads', icon: Upload, label: 'Uploads' },
   { to: '/templates', icon: FileText, label: 'Templates' },
   { to: '/delivery-logs', icon: ClipboardList, label: 'Delivery Logs' },
+  { to: '/logs', icon: Activity, label: 'Activity Logs' },
 ];
 
 export default function Sidebar() {

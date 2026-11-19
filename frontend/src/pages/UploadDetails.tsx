@@ -23,7 +23,7 @@ import StatusBadge from '../components/StatusBadge';
 import StatsCard from '../components/StatsCard';
 import { uploadApi } from '../api/upload.api';
 import { templateApi } from '../api/template.api';
-import { Upload, Contact, Template } from '../types';
+import { Upload, Contact, Template, CampaignHealth } from '../types';
 
 const columnHelper = createColumnHelper<Contact>();
 
@@ -246,6 +246,27 @@ export default function UploadDetails() {
     updateHeight();
     setTimeout(updateHeight, 200);
     setTimeout(updateHeight, 1000);
+  };
+
+  // Stall detection: poll health while the campaign is processing
+  const [health, setHealth] = useState<CampaignHealth | null>(null);
+  useEffect(() => {
+    if (!id || upload?.status !== 'processing') { setHealth(null); return; }
+    const check = () => uploadApi.getHealth(id).then((r) => setHealth(r.data)).catch(() => {});
+    check();
+    const t = setInterval(check, 30000);
+    return () => clearInterval(t);
+  }, [id, upload?.status]);
+
+  const handleResume = async () => {
+    if (!id) return;
+    try {
+      const r = await uploadApi.resumeSend(id);
+      toast.success(r.data.message);
+      uploadApi.getHealth(id).then((h) => setHealth(h.data)).catch(() => {});
+    } catch (e: any) {
+      toast.error(e?.response?.data?.message || 'Resume failed');
+    }
   };
 
   const fetchDetails = () => {
@@ -498,12 +519,36 @@ export default function UploadDetails() {
       )}
 
       {/* Processing indicator */}
-      {upload.status === 'processing' && (
-        <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-4 flex items-center gap-3">
-          <Loader2 className="w-5 h-5 text-blue-400 animate-spin" />
-          <p className="text-sm text-blue-400 font-medium">
-            Sending emails in progress...
-          </p>
+      {upload.status === 'processing' && !health?.stalled && (
+        <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-4 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Loader2 className="w-5 h-5 text-blue-400 animate-spin" />
+            <p className="text-sm text-blue-400 font-medium">
+              Sending emails in progress...
+              {health?.lastSent && (
+                <span className="text-blue-300/70 font-normal"> Last: {health.lastSent.email} at {new Date(health.lastSent.sentAt).toLocaleTimeString()}</span>
+              )}
+            </p>
+          </div>
+          <Link to={`/logs?uploadId=${id}`} className="text-xs text-blue-300 underline whitespace-nowrap">View activity log</Link>
+        </div>
+      )}
+      {upload.status === 'processing' && health?.stalled && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-red-400 mt-0.5" />
+            <div className="text-sm text-red-300">
+              <p className="font-semibold">Sending appears to be stuck ({health.pending} pending)</p>
+              {health.reasons.map((r) => <p key={r} className="text-red-300/80">{r}</p>)}
+              {health.lastError && <p className="text-red-300/60 text-xs break-all mt-1">Last error: {health.lastError.message}</p>}
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <Link to={`/logs?uploadId=${id}`} className="btn-secondary text-sm py-2 px-4 whitespace-nowrap">View log</Link>
+            <button onClick={handleResume} className="btn-primary text-sm py-2 px-4 flex items-center gap-2 whitespace-nowrap">
+              <Play className="w-4 h-4" /> Resume sending
+            </button>
+          </div>
         </div>
       )}
 

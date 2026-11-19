@@ -5,6 +5,7 @@ require('./emailOrchestrator');
 require('./getPendingContactsActivity');
 require('./sendEmailActivity');
 require('./getRandomDelayActivity');
+require('./logCampaignActivity');
 
 async function starterHandler(request, context) {
   const client = df.getClient(context);

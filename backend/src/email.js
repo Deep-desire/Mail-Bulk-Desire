@@ -51,6 +51,7 @@ const graphCredential = isGraphConfigured
 // Cache the app-only Graph token between sends (tokens are valid ~1hr) instead
 // of requesting a new one per email.
 let cachedGraphToken = null;
+const GRAPH_TIMEOUT_MS = parseInt(process.env.GRAPH_TIMEOUT_MS || '30000', 10);
 async function getGraphToken() {
   if (cachedGraphToken && cachedGraphToken.expiresOnTimestamp > Date.now() + 60000) {
     return cachedGraphToken.token;
@@ -158,33 +159,55 @@ async function sendViaAzure(options) {
 // that blocked plain SMTP sends between desireinfoweb.in and .com earlier.
 async function sendViaGraph(options) {
   if (!isGraphConfigured) throw new Error('Microsoft Graph is not configured');
-  const token = await getGraphToken();
-
-  const res = await fetch(
-    `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(MS_GRAPH_SENDER_EMAIL)}/sendMail`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        message: {
-          subject: options.subject,
-          body: { contentType: 'HTML', content: options.html },
-          toRecipients: [{ emailAddress: { address: options.to } }],
-        },
-        saveToSentItems: true,
-      }),
+  // Up to 3 tries, honouring Graph/Exchange throttling (429/503 + Retry-After).
+  // Every call has a hard timeout: before, a hung request blocked the send
+  // step until Azure killed it (5-10 min), which looked like a random pause.
+  const maxTries = 3;
+  for (let attempt = 1; attempt <= maxTries; attempt++) {
+    const token = await getGraphToken();
+    let res;
+    try {
+      res = await fetch(
+        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(MS_GRAPH_SENDER_EMAIL)}/sendMail`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            message: {
+              subject: options.subject,
+              body: { contentType: 'HTML', content: options.html },
+              toRecipients: [{ emailAddress: { address: options.to } }],
+            },
+            saveToSentItems: true,
+          }),
+          signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS),
+        }
+      );
+    } catch (err) {
+      if (attempt === maxTries) throw new Error(`Graph sendMail network error/timeout after ${GRAPH_TIMEOUT_MS}ms: ${err.message}`);
+      await new Promise((r) => setTimeout(r, 5000 * attempt));
+      continue;
     }
-  );
 
-  if (res.status !== 202) {
+    // sendMail returns 202 Accepted with no body/message id
+    if (res.status === 202) return 'accepted';
+
     const body = await res.text().catch(() => '');
+    if (res.status === 401) cachedGraphToken = null;
+
+    if ((res.status === 429 || res.status === 503 || res.status === 504 || res.status === 401) && attempt < maxTries) {
+      const retryAfterSec = parseInt(res.headers.get('retry-after') || '', 10);
+      const waitMs = Math.min(Number.isFinite(retryAfterSec) ? retryAfterSec * 1000 : 30000 * attempt, 120000);
+      console.warn(`Graph ${res.status} (throttled/unavailable) for ${options.to}, waiting ${waitMs}ms. ${body.slice(0, 200)}`);
+      await new Promise((r) => setTimeout(r, waitMs));
+      continue;
+    }
     throw new Error(`Graph sendMail failed (${res.status}): ${body || res.statusText}`);
   }
-  // sendMail returns 202 Accepted with no body/message id
-  return 'accepted';
+  throw new Error('Graph sendMail failed after retries');
 }
 
 // Fallback chain, tried in order until one succeeds. Each provider's free tier
@@ -243,18 +266,20 @@ async function sendEmail(options) {
     try {
       const messageId = await provider.send(options);
       console.log(`Email sent via ${provider.name} to ${options.to}: ${messageId}`);
-      return { messageId, provider: provider.name };
+      return { messageId, provider: provider.name, providerErrors: errors };
     } catch (err) {
       console.warn(`${provider.name} failed for ${options.to}: ${err.message}. Trying next provider.`);
       errors.push(`${provider.name}: ${err.message}`);
     }
   }
 
-  throw new Error(
+  const finalErr = new Error(
     errors.length > 0
       ? `All email providers failed. Errors: ${errors.join(' | ')}`
       : 'No email providers are configured and enabled'
   );
+  finalErr.providerErrors = errors;
+  throw finalErr;
 }
 
 module.exports = { sendEmail, PROVIDER_META, invalidateProviderSettingsCache };

@@ -9,6 +9,7 @@ const { generateToken, comparePassword, hashPassword, authenticate } = require('
 const { sendEmail, PROVIDER_META, invalidateProviderSettingsCache } = require('./email');
 const { renderTemplate, invalidateTemplate } = require('./templates-service');
 const { recountUploadStats, checkUploadCompletion } = require('./upload-helpers');
+const { logCampaign } = require('./campaign-log');
 
 require('dotenv').config();
 
@@ -156,8 +157,13 @@ async function dispatchCampaignOrchestration(uploadId, templateId, scheduledAt =
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ uploadId, templateId, scheduledAt }),
       });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`Durable starter returned HTTP ${res.status}: ${body.slice(0, 300)}`);
+      }
       const data = await res.json();
       console.log(`[Durable Starter Success] Upload ${uploadId}:`, data);
+      await logCampaign(uploadId, 'info', 'dispatch', `Handed off to Azure Durable orchestrator (instance ${data?.id})`, { scheduledAt });
 
       // Persist the instance id + its terminate URL so /unschedule can actually
       // cancel the running orchestration later, instead of only flipping this
@@ -171,7 +177,10 @@ async function dispatchCampaignOrchestration(uploadId, templateId, scheduledAt =
       return;
     } catch (err) {
       console.error(`[Durable Starter Error] Upload ${uploadId}:`, err.message);
+      await logCampaign(uploadId, 'error', 'dispatch_failed', `Could not start Azure orchestrator: ${err.message}. Falling back to in-process worker (it stops when the serverless function freezes).`);
     }
+  } else {
+    await logCampaign(uploadId, 'warn', 'dispatch_local', 'DURABLE_STARTER_URL not set: using in-process worker. On Vercel this only runs while a request keeps the function alive.');
   }
 
   // Fallback: Local In-Process Worker
@@ -220,6 +229,7 @@ async function processCampaignInBackground(uploadId, templateId) {
       return;
     }
 
+    await logCampaign(uploadId, 'info', 'worker_start', `In-process worker picked up ${pendingContacts.length} pending emails`);
     console.log(`\n🚀 [Campaign Worker] Processing ${pendingContacts.length} pending emails for campaign "${upload.originalName}" (${uploadId})...`);
 
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
@@ -253,12 +263,16 @@ async function processCampaignInBackground(uploadId, templateId) {
           });
           sentSuccessfully = true;
           deliveryProvider = result.provider;
+          if (result.providerErrors?.length) {
+            await logCampaign(uploadId, 'warn', 'provider_fallback', `Sent to ${contact.email} via ${result.provider} after other providers failed`, { providerErrors: result.providerErrors });
+          }
           console.log(`  ✅ [Success] Sent to ${contact.email} | Provider: ${result.provider} | ID: ${result.messageId}`);
           break;
         } catch (err) {
           attempts++;
           lastError = err;
           console.warn(`  ⚠️ [Retry ${attempts}/3] Failed to send to ${contact.email}: ${err.message}`);
+          await logCampaign(uploadId, 'warn', 'send_attempt_failed', `Attempt ${attempts}/3 failed for ${contact.email}: ${err.message}`, { providerErrors: err.providerErrors });
           if (attempts < 3) await new Promise((r) => setTimeout(r, 1000));
         }
       }
@@ -282,6 +296,9 @@ async function processCampaignInBackground(uploadId, templateId) {
         },
       });
 
+      await logCampaign(uploadId, sentSuccessfully ? 'info' : 'error', sentSuccessfully ? 'send_ok' : 'send_failed',
+        sentSuccessfully ? `Sent to ${contact.email} via ${deliveryProvider}` : `Gave up on ${contact.email}: ${lastError?.message}`);
+
       if (i < pendingContacts.length - 1) {
         const delayMs = EMAIL_BATCH_DELAY_MS > 0 ? EMAIL_BATCH_DELAY_MS : 1000;
         await new Promise((r) => setTimeout(r, delayMs));
@@ -292,6 +309,7 @@ async function processCampaignInBackground(uploadId, templateId) {
     console.log(`🎉 [Campaign Finished] Campaign "${upload.originalName}" finished with status: "${finalStatus}"\n`);
   } catch (err) {
     console.error(`❌ [Worker Error] Campaign ${uploadId}:`, err.message);
+    await logCampaign(uploadId, 'error', 'worker_crashed', `In-process worker crashed: ${err.message}`);
   } finally {
     activeRunningCampaigns.delete(uploadId);
   }
@@ -1130,6 +1148,134 @@ apiRouter.post('/templates/:id/test', catchAsync(async (req, res) => {
   });
 
   return res.status(200).json({ message: `Test email sent to ${testEmail}` });
+}));
+
+// ---------------------------------------------------------------------------
+// Campaign activity logs + health / stall diagnosis
+// ---------------------------------------------------------------------------
+const STALL_THRESHOLD_MS = parseInt(process.env.CAMPAIGN_STALL_THRESHOLD_MS || '180000', 10);
+
+// Derive the Durable Functions status URL from the stored terminate URL:
+// .../instances/{id}/terminate?reason={text}&taskHub=..&code=..  ->  .../instances/{id}?taskHub=..&code=..
+function durableStatusUrl(terminateUrl) {
+  if (!terminateUrl) return null;
+  try {
+    const u = new URL(terminateUrl.replace('/terminate', ''));
+    u.searchParams.delete('reason');
+    return u.toString();
+  } catch (_e) {
+    return null;
+  }
+}
+
+async function fetchDurableStatus(upload) {
+  const url = durableStatusUrl(upload.durableTerminateUrl);
+  if (!url) return null;
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!r.ok && r.status !== 202) return { error: `HTTP ${r.status}` };
+    const d = await r.json();
+    return {
+      instanceId: d.instanceId,
+      runtimeStatus: d.runtimeStatus, // Running, Completed, Failed, Terminated, ContinuedAsNew, Pending
+      createdTime: d.createdTime,
+      lastUpdatedTime: d.lastUpdatedTime,
+      output: typeof d.output === 'string' ? d.output.slice(0, 2000) : d.output,
+    };
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+// GET /logs?uploadId=&level=&limit=&before=
+apiRouter.get('/logs', catchAsync(async (req, res) => {
+  await authenticate(req);
+  const { uploadId, level, before } = req.query;
+  const limit = Math.min(parseInt(req.query.limit || '200', 10) || 200, 1000);
+  const where = {};
+  if (uploadId) where.uploadId = String(uploadId);
+  if (level && level !== 'all') where.level = String(level);
+  if (before) where.createdAt = { lt: new Date(String(before)) };
+  const logs = await prisma.campaignLog.findMany({ where, orderBy: { createdAt: 'desc' }, take: limit });
+  return res.status(200).json({ logs });
+}));
+
+// GET /uploads/:id/health — is the campaign actually moving?
+apiRouter.get('/uploads/:id/health', catchAsync(async (req, res) => {
+  await authenticate(req);
+  const { id } = req.params;
+  const upload = await prisma.upload.findUnique({ where: { id } });
+  if (!upload) return res.status(404).json({ message: 'Upload not found' });
+
+  const [pending, lastLog, lastSent, lastError] = await Promise.all([
+    prisma.contact.count({ where: { uploadId: id, deliveryStatus: 'pending' } }),
+    prisma.campaignLog.findFirst({ where: { uploadId: id }, orderBy: { createdAt: 'desc' } }),
+    prisma.contact.findFirst({
+      where: { uploadId: id, deliveryStatus: { in: ['sent', 'failed'] }, sentAt: { not: null } },
+      orderBy: { sentAt: 'desc' },
+      select: { sentAt: true, email: true, deliveryStatus: true, deliveryError: true },
+    }),
+    prisma.campaignLog.findFirst({ where: { uploadId: id, level: 'error' }, orderBy: { createdAt: 'desc' } }),
+  ]);
+
+  const times = [lastLog?.createdAt, lastSent?.sentAt].filter(Boolean).map((d) => new Date(d).getTime());
+  const lastActivityAt = times.length ? new Date(Math.max(...times)) : null;
+  const idleMs = lastActivityAt ? Date.now() - lastActivityAt.getTime() : null;
+  const durable = await fetchDurableStatus(upload);
+
+  const reasons = [];
+  if (upload.status === 'processing' && pending > 0) {
+    if (idleMs !== null && idleMs > STALL_THRESHOLD_MS) reasons.push(`No send activity for ${Math.round(idleMs / 60000)} min`);
+    if (durable?.runtimeStatus && ['Failed', 'Terminated', 'Completed'].includes(durable.runtimeStatus)) {
+      reasons.push(`Azure orchestration is '${durable.runtimeStatus}' but ${pending} contacts are still pending`);
+    }
+    if (!process.env.DURABLE_STARTER_URL) {
+      reasons.push('Running on the in-process worker (DURABLE_STARTER_URL not set), which stops when Vercel freezes the function');
+    }
+  }
+
+  return res.status(200).json({
+    status: upload.status,
+    pending,
+    lastActivityAt,
+    idleMs,
+    lastSent,
+    lastError,
+    durable,
+    mode: process.env.DURABLE_STARTER_URL ? 'azure-durable' : 'in-process',
+    stalled: reasons.length > 0,
+    reasons,
+  });
+}));
+
+// POST /uploads/:id/resume — restart sending for the remaining pending contacts
+apiRouter.post('/uploads/:id/resume', catchAsync(async (req, res) => {
+  await authenticate(req);
+  const { id } = req.params;
+  const upload = await prisma.upload.findUnique({ where: { id } });
+  if (!upload) return res.status(404).json({ message: 'Upload not found' });
+  if (!upload.templateId) return res.status(400).json({ message: 'Campaign has no template' });
+
+  const pending = await prisma.contact.count({ where: { uploadId: id, deliveryStatus: 'pending' } });
+  if (pending === 0) {
+    await checkUploadCompletion(id);
+    return res.status(400).json({ message: 'No pending contacts to resume' });
+  }
+
+  // Stop any orchestration that may still be alive so two senders never run at once.
+  if (upload.durableTerminateUrl) {
+    const durable = await fetchDurableStatus(upload);
+    if (durable?.runtimeStatus && ['Running', 'Pending', 'ContinuedAsNew'].includes(durable.runtimeStatus)) {
+      const url = upload.durableTerminateUrl.replace('{text}', encodeURIComponent('Resumed from UI'));
+      await fetch(url, { method: 'POST' }).catch(() => {});
+      await logCampaign(id, 'warn', 'terminate_old', `Terminated previous orchestration ${durable.instanceId} (${durable.runtimeStatus}) before resuming`);
+    }
+  }
+
+  await prisma.upload.update({ where: { id }, data: { status: 'processing', pendingCount: pending } });
+  await logCampaign(id, 'info', 'resume', `Resume requested from UI for ${pending} pending contacts`);
+  await dispatchCampaignOrchestration(id, upload.templateId);
+  return res.status(200).json({ message: `Resumed ${pending} pending contacts` });
 }));
 
 app.use('/api', apiRouter);

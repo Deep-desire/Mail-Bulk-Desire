@@ -1,6 +1,6 @@
 {
-    "azureFunctions.deploySubpath": "functions",
-    "azureFunctions.projectSubpath": "functions",
+    "azureFunctions.deploySubpath": "backend",
+    "azureFunctions.projectSubpath": "backend",
     "azureFunctions.projectLanguage": "JavaScript",
     "azureFunctions.projectRuntime": "~4",
     "debug.internalConsoleOptions": "neverOpen"
