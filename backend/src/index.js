@@ -237,6 +237,12 @@ async function processCampaignInBackground(uploadId, templateId) {
     for (let i = 0; i < pendingContacts.length; i++) {
       const contact = pendingContacts[i];
 
+      const claim = await prisma.contact.updateMany({
+        where: { id: contact.id, deliveryStatus: 'pending' },
+        data: { deliveryStatus: 'sending', sentAt: new Date() },
+      });
+      if (claim.count === 0) continue; // another sender already took it
+
       const token = crypto.createHash('sha256').update(contact.email + 'desire-unsubscribe-salt').digest('hex').substring(0, 32);
       const unsubscribeLink = `${frontendUrl}/unsubscribe/${token}`;
 
@@ -1255,6 +1261,21 @@ apiRouter.post('/uploads/:id/resume', catchAsync(async (req, res) => {
   const upload = await prisma.upload.findUnique({ where: { id } });
   if (!upload) return res.status(404).json({ message: 'Upload not found' });
   if (!upload.templateId) return res.status(400).json({ message: 'Campaign has no template' });
+
+  // Cooldown: refuse a second resume within 2 minutes (double-clicks used to
+  // start several parallel senders and email people multiple times).
+  const recent = await prisma.campaignLog.findFirst({
+    where: { uploadId: id, event: { in: ['resume', 'dispatch'] }, createdAt: { gt: new Date(Date.now() - 120000) } },
+  });
+  if (recent) {
+    return res.status(429).json({ message: 'Campaign was just started/resumed. Wait 2 minutes and check the activity log before resuming again.' });
+  }
+
+  // Contacts stuck in 'sending' for >10 min (sender died mid-send) go back to pending.
+  await prisma.contact.updateMany({
+    where: { uploadId: id, deliveryStatus: 'sending', sentAt: { lt: new Date(Date.now() - 600000) } },
+    data: { deliveryStatus: 'pending' },
+  });
 
   const pending = await prisma.contact.count({ where: { uploadId: id, deliveryStatus: 'pending' } });
   if (pending === 0) {

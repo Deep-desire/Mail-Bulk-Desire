@@ -9,19 +9,7 @@ const { logCampaign, withDbRetry } = require('../campaign-log');
 async function sendEmailActivity(input, context) {
   const { uploadId, templateId, contact } = input;
 
-  // Idempotency: this activity is retried by the orchestrator, so never
-  // re-send to a contact that is no longer pending (e.g. the email went out
-  // but a later DB write failed on the previous attempt).
-  const current = await withDbRetry(
-    () => prisma.contact.findUnique({ where: { id: contact.id }, select: { deliveryStatus: true } }),
-    'load contact'
-  );
-  if (!current || current.deliveryStatus !== 'pending') {
-    await logCampaign(uploadId, 'info', 'skip_not_pending', `${contact.email} is '${current ? current.deliveryStatus : 'deleted'}', skipping`);
-    return { sent: false, contactId: contact.id, skipped: true };
-  }
-
-  // Campaign may have been cancelled/reset from the UI.
+  // Campaign may have been cancelled/paused from the UI.
   const upload = await withDbRetry(
     () => prisma.upload.findUnique({ where: { id: uploadId }, select: { status: true } }),
     'load upload'
@@ -29,6 +17,20 @@ async function sendEmailActivity(input, context) {
   if (!upload || (upload.status !== 'processing' && upload.status !== 'scheduled')) {
     await logCampaign(uploadId, 'warn', 'campaign_not_active', `Upload status is '${upload ? upload.status : 'deleted'}', not sending to ${contact.email}`);
     return { sent: false, contactId: contact.id, stop: true };
+  }
+
+  // ATOMIC CLAIM: flip pending -> sending in one UPDATE. Only one sender can
+  // win this, so even if several orchestrations run at once (or an activity
+  // is retried) a contact is emailed at most once.
+  const claim = await withDbRetry(
+    () => prisma.contact.updateMany({
+      where: { id: contact.id, deliveryStatus: 'pending' },
+      data: { deliveryStatus: 'sending', sentAt: new Date() },
+    }),
+    'claim contact'
+  );
+  if (claim.count === 0) {
+    return { sent: false, contactId: contact.id, skipped: true };
   }
 
   const template = await withDbRetry(() => prisma.template.findUnique({ where: { id: templateId } }), 'load template');

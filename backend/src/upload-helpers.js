@@ -32,7 +32,7 @@ async function checkUploadCompletion(uploadId) {
   if (!upload) return 'failed';
 
   const pendingCount = await prisma.contact.count({
-    where: { uploadId, deliveryStatus: 'pending' },
+    where: { uploadId, deliveryStatus: { in: ['pending', 'sending'] } },
   });
 
   if (pendingCount === 0) {

@@ -258,14 +258,19 @@ export default function UploadDetails() {
     return () => clearInterval(t);
   }, [id, upload?.status]);
 
+  const [resuming, setResuming] = useState(false);
   const handleResume = async () => {
-    if (!id) return;
+    if (!id || resuming) return;
+    if (!window.confirm('Resume sending the remaining pending emails?')) return;
+    setResuming(true);
     try {
       const r = await uploadApi.resumeSend(id);
       toast.success(r.data.message);
       uploadApi.getHealth(id).then((h) => setHealth(h.data)).catch(() => {});
     } catch (e: any) {
       toast.error(e?.response?.data?.message || 'Resume failed');
+    } finally {
+      setTimeout(() => setResuming(false), 120000);
     }
   };
 
@@ -532,7 +537,7 @@ export default function UploadDetails() {
           </div>
           <div className="flex items-center gap-3">
             <Link to={`/logs?uploadId=${id}`} className="text-xs text-blue-300 underline whitespace-nowrap">View activity log</Link>
-            <button onClick={handleResume} className="btn-secondary text-xs py-1.5 px-3 flex items-center gap-1 whitespace-nowrap">
+            <button onClick={handleResume} disabled={resuming} className="btn-secondary text-xs py-1.5 px-3 flex items-center gap-1 whitespace-nowrap">
               <Play className="w-3.5 h-3.5" /> Resume sending
             </button>
           </div>
@@ -550,7 +555,7 @@ export default function UploadDetails() {
           </div>
           <div className="flex gap-2">
             <Link to={`/logs?uploadId=${id}`} className="btn-secondary text-sm py-2 px-4 whitespace-nowrap">View log</Link>
-            <button onClick={handleResume} className="btn-primary text-sm py-2 px-4 flex items-center gap-2 whitespace-nowrap">
+            <button onClick={handleResume} disabled={resuming} className="btn-primary text-sm py-2 px-4 flex items-center gap-2 whitespace-nowrap">
               <Play className="w-4 h-4" /> Resume sending
             </button>
           </div>

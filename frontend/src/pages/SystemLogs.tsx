@@ -66,14 +66,19 @@ export default function SystemLogs() {
     return () => clearInterval(t);
   }, [load, live]);
 
+  const [resuming, setResuming] = useState(false);
   const resume = async () => {
-    if (!uploadId) return;
+    if (!uploadId || resuming) return;
+    if (!window.confirm('Resume sending the remaining pending emails?')) return;
+    setResuming(true);
     try {
       const r = await uploadApi.resumeSend(uploadId);
       toast.success(r.data.message);
       load();
     } catch (e: any) {
       toast.error(e?.response?.data?.message || 'Resume failed');
+    } finally {
+      setTimeout(() => setResuming(false), 120000);
     }
   };
 
@@ -137,7 +142,7 @@ export default function SystemLogs() {
             <div className="flex gap-2">
               <Link to={`/uploads/${uploadId}`} className="btn-secondary text-sm py-2 px-4">Open campaign</Link>
               {health.pending > 0 && (
-                <button onClick={resume} className="btn-primary text-sm py-2 px-4 flex items-center gap-2">
+                <button onClick={resume} disabled={resuming} className="btn-primary text-sm py-2 px-4 flex items-center gap-2">
                   <Play className="w-4 h-4" /> Resume sending ({health.pending})
                 </button>
               )}
