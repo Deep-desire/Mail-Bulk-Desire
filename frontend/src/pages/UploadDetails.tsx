@@ -530,7 +530,12 @@ export default function UploadDetails() {
               )}
             </p>
           </div>
-          <Link to={`/logs?uploadId=${id}`} className="text-xs text-blue-300 underline whitespace-nowrap">View activity log</Link>
+          <div className="flex items-center gap-3">
+            <Link to={`/logs?uploadId=${id}`} className="text-xs text-blue-300 underline whitespace-nowrap">View activity log</Link>
+            <button onClick={handleResume} className="btn-secondary text-xs py-1.5 px-3 flex items-center gap-1 whitespace-nowrap">
+              <Play className="w-3.5 h-3.5" /> Resume sending
+            </button>
+          </div>
         </div>
       )}
       {upload.status === 'processing' && health?.stalled && (
