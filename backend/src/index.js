@@ -8,7 +8,7 @@ const { prisma, ContactStatus } = require('./prisma');
 const { generateToken, comparePassword, hashPassword, authenticate } = require('./auth');
 const { sendEmail, PROVIDER_META, invalidateProviderSettingsCache } = require('./email');
 const { renderTemplate, invalidateTemplate } = require('./templates-service');
-const { recountUploadStats, checkUploadCompletion } = require('./upload-helpers');
+const { recountUploadStats, checkUploadCompletion, liveDeliveryCounts } = require('./upload-helpers');
 const { logCampaign } = require('./campaign-log');
 
 require('dotenv').config();
@@ -625,7 +625,8 @@ apiRouter.get('/uploads/:id/stats', catchAsync(async (req, res) => {
     },
   });
   if (!upload) return res.status(404).json({ message: 'Upload not found' });
-  return res.status(200).json(upload);
+  const live = await liveDeliveryCounts(id, upload.status);
+  return res.status(200).json({ ...upload, ...live });
 }));
 
 // GET /uploads/:id/contacts — Paginated contacts for an upload
@@ -659,7 +660,10 @@ apiRouter.get('/uploads/:id', catchAsync(async (req, res) => {
     include: { template: true },
   });
   if (!upload) return res.status(404).json({ message: 'Upload not found' });
-  return res.status(200).json(upload);
+  const live = await liveDeliveryCounts(id, upload.status);
+  // Persist corrected counters so the uploads list/dashboard agree too.
+  prisma.upload.update({ where: { id }, data: live }).catch(() => {});
+  return res.status(200).json({ ...upload, ...live });
 }));
 
 // PUT /uploads/:id — Update upload label/fileName
@@ -724,7 +728,8 @@ apiRouter.put('/contacts/:id', catchAsync(async (req, res) => {
   });
 
   await revalidateDuplicatesForEmails(contact.uploadId, [updatedEmail, contact.email]);
-  const newCounts = await recountUploadStats(contact.uploadId);
+  const parent = await prisma.upload.findUnique({ where: { id: contact.uploadId }, select: { status: true } });
+  const newCounts = await liveDeliveryCounts(contact.uploadId, parent?.status);
   await prisma.upload.update({ where: { id: contact.uploadId }, data: newCounts });
 
   return res.status(200).json(updatedContact);
@@ -741,7 +746,8 @@ apiRouter.delete('/contacts/:id', catchAsync(async (req, res) => {
   await prisma.contact.delete({ where: { id } });
 
   await revalidateDuplicatesForEmails(contact.uploadId, [contact.email]);
-  const newCounts = await recountUploadStats(contact.uploadId);
+  const parent = await prisma.upload.findUnique({ where: { id: contact.uploadId }, select: { status: true } });
+  const newCounts = await liveDeliveryCounts(contact.uploadId, parent?.status);
   await prisma.upload.update({ where: { id: contact.uploadId }, data: newCounts });
 
   return res.status(200).json({ message: 'Contact deleted successfully' });
@@ -1317,9 +1323,18 @@ apiRouter.post('/uploads/:id/resume', catchAsync(async (req, res) => {
     if (idle < STALL_THRESHOLD_MS || (senderAlive && idle < STALL_THRESHOLD_MS * 2)) {
       return res.status(409).json({ message: 'Campaign is already sending. Use Pause if you want to stop it.' });
     }
-  } else if (upload.status !== 'paused') {
+  } else if (!['paused', 'completed', 'completed_with_errors', 'failed'].includes(upload.status)) {
     return res.status(400).json({ message: `Cannot resume a campaign that is '${upload.status}'` });
   }
+
+  // Valid contacts that never entered the send queue (e.g. edited after the
+  // campaign started) become pending now. Already-sent contacts are untouched.
+  const unsubRows = await prisma.unsubscribed.findMany({ select: { email: true } });
+  const unsubList = unsubRows.map((r) => r.email.toLowerCase());
+  await prisma.contact.updateMany({
+    where: { uploadId: id, status: 'valid', deliveryStatus: 'idle', email: { notIn: unsubList } },
+    data: { deliveryStatus: 'pending' },
+  });
 
   // Cooldown: refuse a second resume within 2 minutes (double-clicks used to
   // start several parallel senders and email people multiple times).

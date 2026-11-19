@@ -281,15 +281,27 @@ export default function UploadDetails() {
   const handleResume = () => runAction('resume');
   const handlePause = () => runAction('pause');
 
+  // Load ALL contacts (pages of 500). Previously only the first 500 were
+  // loaded, so filters like "Failed" showed nothing for later rows.
+  const fetchAllContacts = async (uploadId: string): Promise<Contact[]> => {
+    const first = await uploadApi.getContacts(uploadId, 1, 500);
+    const all = [...first.data.contacts];
+    for (let p = 2; p <= first.data.totalPages; p++) {
+      const r = await uploadApi.getContacts(uploadId, p, 500);
+      all.push(...r.data.contacts);
+    }
+    return all;
+  };
+
   const fetchDetails = () => {
     if (!id) return;
     Promise.all([
       uploadApi.getOne(id),
-      uploadApi.getContacts(id, 1, 500),
+      fetchAllContacts(id),
     ])
-      .then(([uploadRes, contactsRes]) => {
+      .then(([uploadRes, allContacts]) => {
         setUpload(uploadRes.data);
-        setContacts(contactsRes.data.contacts);
+        setContacts(allContacts);
       })
       .catch((err) => {
         toast.error('Failed to load details');
@@ -302,11 +314,11 @@ export default function UploadDetails() {
     // Initial fetch
     Promise.all([
       uploadApi.getOne(id),
-      uploadApi.getContacts(id, 1, 500),
+      fetchAllContacts(id),
     ])
-      .then(([uploadRes, contactsRes]) => {
+      .then(([uploadRes, allContacts]) => {
         setUpload(uploadRes.data);
-        setContacts(contactsRes.data.contacts);
+        setContacts(allContacts);
       })
       .finally(() => setLoading(false));
   }, [id]);
@@ -324,7 +336,7 @@ export default function UploadDetails() {
         setUpload((prev) =>
           prev ? { ...prev, ...stats, status: stats.status as Upload['status'] } : prev
         );
-        if (stats.status === 'completed' || stats.status === 'failed') {
+        if (stats.status !== 'processing') {
           fetchDetails();
         }
       } catch (_err) {
@@ -566,6 +578,16 @@ export default function UploadDetails() {
               <Play className="w-4 h-4" /> Resume sending
             </button>
           </div>
+        </div>
+      )}
+      {['completed', 'completed_with_errors', 'failed'].includes(upload.status) && upload.pendingCount > 0 && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <p className="text-sm text-amber-300 font-medium">
+            {upload.pendingCount} valid contact{upload.pendingCount === 1 ? ' was' : 's were'} never sent (added or edited after sending started).
+          </p>
+          <button onClick={handleResume} disabled={busy} className="btn-primary text-sm py-2 px-4 flex items-center gap-2 whitespace-nowrap disabled:opacity-50">
+            <Play className="w-4 h-4" /> Send remaining ({upload.pendingCount})
+          </button>
         </div>
       )}
       {upload.status === 'paused' && (
